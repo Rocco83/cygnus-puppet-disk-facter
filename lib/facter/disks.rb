@@ -176,6 +176,24 @@ Facter.add(:arcconf_path) do
   setcode { find_path("arcconf") }
 end
 
+Facter.add(:sas2ircu_path) do
+  confine :kernel => "Linux"
+  setcode { find_path("sas2ircu") }
+end
+
+Facter.add(:lsscsi_path) do
+  confine :kernel => "Linux"
+  setcode { find_path("lsscsi") }
+end
+
+def lsscsi_exec(command)
+  lsscsi = Facter.value(:lsscsi_path)
+  raise "no lsscsi tool found" unless lsscsi
+  output = Facter::Util::Resolution.exec("#{lsscsi} #{command}")
+  raise "no output from lsscsi #{command}. binary missing?" unless output
+  return output
+end
+
 def twcli_exec(command)
   twcli = Facter.value(:twcli_path)
   raise "no tw-cli tool found" unless twcli
@@ -269,15 +287,16 @@ if Facter.value(:kernel) == "Linux"
         when "ahci", "ata_piix", "sata_via"
           Facter.debug "Device #{device.device} is standard (s)ata"
           device.disks << SmartDiskInfo.new(device.device, device.devpath, "ata")
-        when "aacraid"
-          Facter.debug "Device #{device} is aacraid"
-          raise "unknown backing device #{device.device} for #{device.driver}" unless device.device == "sda"
-          # guessing that sda maps to controller 1
-          controller = 1
-          device.raidtype = aacraid_query_raidtype(controller)
-          Facter.debug "Raid Type is RAID-#{device.raidtype}"
-          device.disks = aacraid_query_disks(device.device, controller)
-          Facter.debug "Raid disks are #{device.disks}"
+        # cause problem with x4150 servers
+        #when "aacraid"
+        #  Facter.debug "Device #{device} is aacraid"
+        #  raise "unknown backing device #{device.device} for #{device.driver}" unless device.device == "sda"
+        #  # guessing that sda maps to controller 1
+        #  controller = 1
+        #  device.raidtype = aacraid_query_raidtype(controller)
+        #  Facter.debug "Raid Type is RAID-#{device.raidtype}"
+        #  device.disks = aacraid_query_disks(device.device, controller)
+        #  Facter.debug "Raid disks are #{device.disks}"
         when "megaraid_sas"
           Facter.debug "Device #{device} is megaraid_sas"
           (0..32).each do |n|
@@ -302,25 +321,49 @@ if Facter.value(:kernel) == "Linux"
 	  device.controller = controller
           Facter.debug "Controller is #{device.controller}"
         when "mpt2sas", "mpt3sas"
-          Facter.debug "Device #{device} is mpt2sas"
-          begin
-            device.disks << SmartDiskInfo.new(device.device, device.devpath, "auto")
-          rescue
-            Facter.debug "mpt2sas device #{device.device} appears not to be a disk: " + $!.to_s
-            # maybe the serial was not found, because it is not a disk
-            # we assume that this is a raid and all unassigned sg devices belong to it
-            Dir.glob("/sys/class/scsi_generic/sg?/device") do |sgpath|
-              nth = sgpath[/sg(.)/, 1]
-              unless FileTest.exist?("#{sgpath}/block") then
-                begin
-                  Facter.debug "mpt2sas device sg#{nth} will be added: " + $!.to_s
-                  device.disks << SmartDiskInfo.new("sg#{nth}", "/dev/sg#{nth}", "scsi")
-                rescue
-                  # ignore processors and such
-                end
-              end
-            end
-          end
+	  # generic scsi driver (sg) is used
+          Facter.debug "Device #{device} is #{device.driver}"
+          #begin
+          #  device.disks << SmartDiskInfo.new(device.device, device.devpath, "auto")
+          #rescue
+          #  Facter.debug "#{device.driver} device #{device.device} appears not to be an exported disk: " + $!.to_s
+          #  # maybe the serial was not found, because it is not a disk
+          #  # we assume that this is a raid and all unassigned sg devices belong to it
+          #  Dir.glob("/sys/class/scsi_generic/sg?/device") do |sgpath|
+          #    nth = sgpath[/sg(.)/, 1]
+          #    unless FileTest.exist?("#{sgpath}/block") then
+          #      begin
+          #        Facter.debug "#{device.driver} device sg#{nth} will be added: " + $!.to_s
+          #        device.disks << SmartDiskInfo.new("sg#{nth}", "/dev/sg#{nth}", "scsi")
+          #      rescue
+          #        # ignore processors and such
+          #      end
+          #    end
+          #  end
+          #end
+          Facter.debug "#{device.driver} make use of standard sg devices. Please ignore the message regarding sd devices"
+	  # Vendor LSI means array, vendor other means HBA
+          Facter.debug "debug #{device.disks} #{device.vendor}"
+	  begin
+	     #mpt_dev = lsscsi_exec("-gi")
+	     # make use of ruby in place of pipes
+             #output = Facter::Util::Resolution.exec("lsscsi -g|grep disk|awk '{print $7}'|cut -d '/' -f 3")
+	     # reduce the list only to devices without a sd device
+	     if device.vendor == 'LSI'
+               output = Facter::Util::Resolution.exec('lsscsi -g|grep disk|grep -e "[[:space:]]\+-[[:space:]]\+/dev/"|awk "{print $7}"|cut -d "/" -f 3')
+  	       output.each_line do |sg_name|
+  	       sg_name.chomp!
+                 Facter.debug "#{device.driver} device #{sg_name} will be added"
+                 device.disks << SmartDiskInfo.new("#{device.device}_#{sg_name}", "/dev/#{sg_name}", "scsi")
+	       end
+	     else
+	       # HBA disk
+	       device.disks << SmartDiskInfo.new(device.device, device.devpath, "scsi")
+  	     end
+	   rescue
+	     # move to failure for lsscsi only? take care of SmartDiskInfo.new
+             Facter.debug "#{device.driver} unable to run lsscsi"
+	  end
         when "mptspi"
           Facter.debug "Device #{device} is mpt"
           # can be raid or plain scsi device. guess plain scsi device.
